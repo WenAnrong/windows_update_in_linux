@@ -15,14 +15,15 @@
 
 #include "ttydrm.h"
 
-#define DEFAULT_TIMEOUT 60
-#define VERSION "1.0.0"
+#define DEFAULT_TIMEOUT 20
+#define VERSION "1.1.0"
 
 static void print_version(void)
 {
     printf("windows_update_in_linux %s\n", VERSION);
     printf("Fake Windows update screen rendered directly on the TTY via DRM/KMS.\n");
-    printf("Requires root. NEVER reboots: restores the desktop after the timeout.\n");
+    printf("Requires root. 50%% update-success -> reboot, 50%% failure -> BSOD.\n");
+    printf("Use --no-reboot to restore the desktop instead of rebooting.\n");
 }
 
 static void print_usage(FILE *out)
@@ -31,26 +32,33 @@ static void print_usage(FILE *out)
         "Usage: windows_update_in_linux [OPTIONS]\n"
         "\n"
         "Switches to an idle VT, grabs DRM master and renders a fake Windows\n"
-        "update screen directly to the physical display. Progress climbs to\n"
-        "35%% and freezes; after the timeout the original desktop is restored\n"
-        "and the program exits. It NEVER reboots.\n"
+        "update screen directly to the physical display. 50%% of the time the\n"
+        "update succeeds (progress to 100%%, then reboot), 50%% it fails\n"
+        "(progress freezes at 35%%..42%%, then the built-in BSOD takes over).\n"
+        "Use --no-reboot to never reboot.\n"
         "\n"
         "Must be run as root:  sudo windows_update_in_linux\n"
         "\n"
         "Options:\n"
-        "  --timeout=SEC    seconds until auto-restore (default: %d)\n"
+        "  --timeout=SEC    minimum runtime / time before the BSOD hand-off\n"
+        "                   (default: %d)\n"
         "  -t SEC           same as --timeout=SEC\n"
+        "  --no-reboot      never reboot: restore the desktop and exit even\n"
+        "                   after a successful update; the BSOD also restores\n"
+        "                   instead of rebooting\n"
         "  --help, -h       show this help and exit\n"
         "  --version, -V    show version and exit\n"
         "\n"
         "Environment:\n"
-        "  WINDOWS_UPDATE_TIMEOUT   default timeout in seconds\n",
+        "  WINDOWS_UPDATE_TIMEOUT   default timeout in seconds\n"
+        "  WINDOWS_UPDATE_MODE      'success' or 'failure' to force an outcome\n",
         DEFAULT_TIMEOUT);
 }
 
 int main(int argc, char **argv)
 {
     unsigned int timeout = DEFAULT_TIMEOUT;
+    int no_reboot = 0;
     const char *env = getenv("WINDOWS_UPDATE_TIMEOUT");
     int i;
 
@@ -68,6 +76,8 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--version") == 0 || strcmp(a, "-V") == 0) {
             print_version();
             return 0;
+        } else if (strcmp(a, "--no-reboot") == 0) {
+            no_reboot = 1;
         } else if (strncmp(a, "--timeout=", 10) == 0) {
             unsigned int v = (unsigned int)strtoul(a + 10, NULL, 10);
             if (v > 0)
@@ -82,5 +92,5 @@ int main(int argc, char **argv)
         }
     }
 
-    return fake_update_ttydrm_run(timeout);
+    return fake_update_ttydrm_run(timeout, no_reboot);
 }

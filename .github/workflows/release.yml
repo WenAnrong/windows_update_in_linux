@@ -9,36 +9,36 @@
 name: release
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+    push:
+        tags:
+            - "v*"
+    workflow_dispatch:
 
 permissions:
-  contents: write
+    contents: write
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    build-and-release:
+        runs-on: ubuntu-24.04
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config \
-            libdrm-dev libfreetype-dev libfontconfig1-dev
+            - name: Install build dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y build-essential cmake pkg-config \
+                    libdrm-dev libfreetype-dev libfontconfig1-dev
 
-      - name: Build
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build -j
-          mkdir -p dist
-          cp windows_update_in_linux dist/
+            - name: Build
+              run: |
+                  cmake -B build -DCMAKE_BUILD_TYPE=Release
+                  cmake --build build -j
+                  mkdir -p dist
+                  cp windows_update_in_linux dist/
 
-      - name: Publish Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/windows_update_in_linux
-          generate_release_notes: true
+            - name: Publish Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: dist/windows_update_in_linux
+                  generate_release_notes: true

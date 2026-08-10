@@ -7,20 +7,22 @@
  * this process, the victim cannot Alt+Tab or switch windows to escape
  * (works on Wayland too, where a normal window could always be escaped).
  *
- * Requires root (VT ioctls + DRM master). Keeps the same safety model as the
- * GUI mode: after `timeout_sec` the saved CRTC is restored, the desktop VT is
- * switched back and the process exits. It NEVER reboots.
+ * Requires root (VT ioctls + DRM master).
  *
  * Flow:
  *   1. find the active VT, switch to an idle VT (desktop suspends, releases DRM)
  *   2. open /dev/dri/card* and drmSetMaster()
  *   3. create a dumb framebuffer and draw the Win11-style update UI (FreeType)
- *   4. animate progress 0 -> 35% (then stuck) with a CSS-style dot spinner
- *   5. after timeout_sec: restore CRTC, drop master, switch back to desktop VT
+ *   4. with 50/50 probability the update either succeeds (progress to 100%%,
+ *      waits for a real background apt update if --real-update, then reboots)
+ *      or fails (progress freezes at 35%%..42%%, then the embedded bsod from
+ *      heyManNice/bsod takes over the screen with an error message)
+ *   5. restore CRTC, drop master, switch back to the desktop VT
  *
- * The layout mirrors ui/update.html (design canvas 1920x1080, scaled).
+ * Design canvas 1920x1080, scaled to the real resolution.
  */
 #include "ttydrm.h"
+#include "bsod_data.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -31,6 +33,8 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -47,7 +51,6 @@
 
 #define DEFAULT_ORIGIN_VT 2   /* fallback restore target if VT query fails */
 #define TARGET_VT         6   /* idle VT to switch to */
-#define STUCK_AT          35  /* fake progress freeze point */
 #define FRAME_MS          120
 
 /* Colors (0x00RRGGBB) — matches ui/update.css */
@@ -329,26 +332,6 @@ static void fb_clear(uint32_t *b, uint32_t w, uint32_t h, uint32_t sp,
     }
 }
 
-static void fb_fill_rect(uint32_t *b, uint32_t w, uint32_t h, uint32_t sp,
-                         int x, int y, int rw, int rh, uint32_t color)
-{
-    int x0 = x < 0 ? 0 : x;
-    int y0 = y < 0 ? 0 : y;
-    int x1 = x + rw, y1 = y + rh;
-    int yy, xx;
-    if (x1 > (int)w)
-        x1 = (int)w;
-    if (y1 > (int)h)
-        y1 = (int)h;
-    if (x0 >= x1 || y0 >= y1)
-        return;
-    for (yy = y0; yy < y1; yy++) {
-        uint32_t *row = b + (uint64_t)yy * sp;
-        for (xx = x0; xx < x1; xx++)
-            row[xx] = color;
-    }
-}
-
 static void fb_blend_px(uint32_t *b, uint32_t w, uint32_t h, uint32_t sp,
                         int x, int y, uint32_t color, uint8_t alpha)
 {
@@ -567,38 +550,47 @@ static void draw_text(FontCtx *fc, uint32_t *b, uint32_t w, uint32_t h,
 }
 
 /* ================================================================== */
-/* UI drawing (mirrors ui/update.html on a 1920x1080 design canvas)    */
+/* UI drawing (Windows-style update screen on a 1920x1080 canvas)      */
 /* ================================================================== */
 static void draw_spinner(uint32_t *b, uint32_t w, uint32_t h, uint32_t sp,
                          int cx, int cy, double s, int64_t now)
 {
-    const int N = 12;
-    const double period = 1600.0;
+    /* Windows style: 6 dots clustered in one arc, orbiting the center.
+       Speed is position-dependent — slowest at the top-left (dots closest,
+       yet visibly spaced) and fastest at the bottom-right (dots widest). */
+    const int N = 6;
     const double TAU = 6.28318530717958647692;
-    int i;
-    int orbit = (int)(38 * s);
-    int dot_r = (int)(5 * s);
-    double phase = fmod((double)now / period, 1.0);
+    const double period = 2200.0;  /* ms per revolution (average) */
+    const double speed_amp = 0.55; /* how much speed varies by position */
+    const double slow_ang = 0.625 * TAU; /* top-left, 225 deg: slowest */
+    const double gap0 = 0.40;      /* average angular gap between dots */
+    const double gap_amp = 0.15;   /* gap shrinks at top-left, widens bottom-right */
+    double w0 = TAU / period;
+    int orbit = (int)(34 * s);
+    int dot_r = (int)(4 * s);
+    double theta;
+    int j;
 
     if (dot_r < 2)
         dot_r = 2;
 
-    for (i = 0; i < N; i++) {
-        double ang = i * (TAU / N);
+    /* non-uniform rotation: slow near top-left, fast near bottom-right */
+    theta = w0 * (double)now + speed_amp * sin(w0 * (double)now - 0.125 * TAU);
+
+    for (j = 0; j < N; j++) {
+        double gap = gap0 * (1.0 - gap_amp * cos(theta - slow_ang));
+        double ang = theta + gap * (double)(j - (N - 1) / 2);
         int dx = (int)(cx + cos(ang) * orbit);
         int dy = (int)(cy + sin(ang) * orbit);
-        double d = fmod((double)i - phase * N + (double)N, (double)N);
-        double a;
-        uint8_t alpha;
-        if (d <= 1.0)
-            a = 1.0;
-        else if (d <= 2.0)
-            a = 2.0 - d; /* 1 -> 0 */
-        else
-            a = 0.10;
-        alpha = (uint8_t)(a * 255);
-        fb_fill_circle(b, w, h, sp, dx, dy, dot_r, COL_FG, alpha);
+        fb_fill_circle(b, w, h, sp, dx, dy, dot_r, COL_FG, 255);
     }
+}
+
+/* return 1 when the environment is a Chinese locale (zh*) */
+static int is_chinese_lang(void)
+{
+    const char *lang = getenv("LANG");
+    return lang && strncmp(lang, "zh", 2) == 0;
 }
 
 static void draw_frame(FontCtx *fc, DrmCtx *drm, int progress, int64_t now)
@@ -607,59 +599,40 @@ static void draw_frame(FontCtx *fc, DrmCtx *drm, int progress, int64_t now)
     uint32_t W = drm->width, H = drm->height, sp = drm->pitch / 4;
     double s = (double)H / 1080.0;
     int cx = (int)W / 2;
-    int sy, ty, ty2, ty3, barw, barx, barh, by, fill;
+    int sy, ty, ty2;
+    int is_zh = is_chinese_lang();
+    const char *hint = is_zh ? "请保持计算机打开状态。"
+                             : "Please keep your computer on.";
+    const char *foot = is_zh ? "计算机可能会重启几次"
+                             : "Your PC may restart several times";
 
     if (s > 2.0)
         s = 2.0;
 
     fb_clear(b, W, H, sp, COL_BG);
 
-    /* spinner + headline block */
+    /* spinner + progress text */
     sy = (int)(H * 0.40);
     draw_spinner(b, W, H, sp, cx, sy, s, now);
 
     ty = sy + (int)(66 * s);
-    draw_text(fc, b, W, H, sp, "正在配置 Linux 更新", cx, ty,
-              COL_FG, (unsigned)(30 * s), 1);
-    ty2 = ty + (int)(48 * s);
-    draw_text(fc, b, W, H, sp, "Configuring Linux updates…", cx, ty2,
-              COL_SUB, (unsigned)(15 * s), 1);
-    ty3 = ty2 + (int)(34 * s);
-    draw_text(fc, b, W, H, sp, "请保持计算机开机", cx, ty3,
-              COL_HINT, (unsigned)(14 * s), 1);
-    draw_text(fc, b, W, H, sp, "Please keep your computer on",
-              cx, ty3 + (int)(26 * s), COL_HINT, (unsigned)(14 * s), 1);
-
-    /* progress bar */
-    barw = (int)(0.34 * W);
-    if (barw < (int)(260 * s))
-        barw = (int)(260 * s);
-    if (barw > (int)(440 * s))
-        barw = (int)(440 * s);
-    barx = cx - barw / 2;
-    barh = (int)(5 * s);
-    if (barh < 2)
-        barh = 2;
-    by = (int)(H - 120 * s);
-    fb_fill_rect(b, W, H, sp, barx, by, barw, barh, COL_BAR);
-    fill = (int)((int64_t)barw * progress / 100);
-    if (fill > 0)
-        fb_fill_rect(b, W, H, sp, barx, by, fill, barh, COL_FG);
-
-    /* percent */
     {
-        char pct[16];
-        snprintf(pct, sizeof(pct), "%d%%", progress);
-        draw_text(fc, b, W, H, sp, pct, cx, by + barh + (int)(16 * s),
-                  COL_FG, (unsigned)(16 * s), 1);
+        char pct[48];
+        snprintf(pct, sizeof(pct),
+                 is_zh ? "正在进行更新 %d%%" : "Working on updates %d%%",
+                 progress);
+        draw_text(fc, b, W, H, sp, pct, cx, ty,
+                  COL_FG, (unsigned)(24 * s), 1);
     }
 
-    /* footnote */
-    draw_text(fc, b, W, H, sp, "您的 PC 将在完成更新后多次重启", cx,
-              by + barh + (int)(56 * s), COL_FOOT, (unsigned)(13 * s), 1);
-    draw_text(fc, b, W, H, sp,
-              "Your PC will restart several times before it's done", cx,
-              by + barh + (int)(82 * s), COL_FOOT, (unsigned)(13 * s), 1);
+    /* hint line */
+    ty2 = ty + (int)(40 * s);
+    draw_text(fc, b, W, H, sp, hint, cx, ty2,
+              COL_FG, (unsigned)(24 * s), 1);
+
+    /* footnote (same size as the middle lines) */
+    draw_text(fc, b, W, H, sp, foot, cx,
+              (int)(H - 90 * s), COL_FG, (unsigned)(24 * s), 1);
 }
 
 static const char *font_family_for_lang(void)
@@ -679,11 +652,108 @@ static const char *font_family_for_lang(void)
 /* ================================================================== */
 /* public API                                                          */
 /* ================================================================== */
-int fake_update_ttydrm_run(unsigned int timeout_sec)
+
+/* Fork a fully detached child that runs a real "apt update && apt upgrade"
+ * in the background while the fake screen is showing. Returns the child
+ * pid, or -1 if not spawned. Logs to windows-update-real.log in the
+ * current directory. */
+static pid_t spawn_real_update(void)
+{
+    pid_t pid;
+
+    if (access("/usr/bin/apt-get", X_OK) != 0) {
+        fprintf(stderr, "[real-update] 未检测到 apt-get，跳过真实更新\n");
+        return -1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        perror("[real-update] fork 失败");
+        return -1;
+    }
+    if (pid > 0) {
+        fprintf(stderr,
+                "[real-update] 已在后台执行 apt update && apt upgrade (pid %d)\n",
+                (int)pid);
+        return pid;
+    }
+
+    /* child: detach from session, silence stdin, log to cwd */
+    if (setsid() < 0)
+        _exit(1);
+    {
+        int devnull = open("/dev/null", O_RDONLY);
+        int logfd = open("windows-update-real.log",
+                         O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (devnull >= 0) {
+            dup2(devnull, 0);
+            if (devnull > 2)
+                close(devnull);
+        }
+        if (logfd < 0)
+            logfd = open("/dev/null", O_WRONLY);
+        if (logfd >= 0) {
+            dup2(logfd, 1);
+            dup2(logfd, 2);
+            if (logfd > 2)
+                close(logfd);
+        }
+    }
+    setenv("DEBIAN_FRONTEND", "noninteractive", 1);
+    execl("/bin/sh", "sh", "-c",
+          "apt-get -y update && apt-get -y upgrade", (char *)NULL);
+    _exit(127);
+}
+
+/* Write the embedded bsod binary to /tmp and exec it, replacing this
+ * process. With no_reboot the bsod restores the desktop instead of
+ * rebooting. Returns -1 if the bsod could not be started. */
+static int launch_bsod(const char *reason, int no_reboot)
+{
+    const char *path = "/tmp/.windows-update-bsod";
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    size_t off = 0;
+
+    if (fd < 0)
+        return -1;
+    while (off < bsod_bin_len) {
+        ssize_t n = write(fd, bsod_bin + off, bsod_bin_len - off);
+        if (n < 0) {
+            close(fd);
+            unlink(path);
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    close(fd);
+    chmod(path, 0755);
+
+    fprintf(stderr, "[tty] 更新失败，启动蓝屏：%s\n", reason);
+    if (no_reboot)
+        execl(path, "bsod", "--show", reason, "--restore", (char *)NULL);
+    else
+        execl(path, "bsod", "--show", reason, (char *)NULL);
+    perror("[tty] exec bsod 失败");
+    return -1;
+}
+
+/* Reboot the machine (does not return on success). */
+static void do_reboot(void)
+{
+    fprintf(stderr, "[tty] 更新完成，2 秒后重启系统...\n");
+    sleep(2);
+    execl("/sbin/reboot", "reboot", (char *)NULL);
+    execl("/usr/sbin/reboot", "reboot", (char *)NULL);
+    perror("[tty] reboot 失败，直接退出");
+}
+
+int fake_update_ttydrm_run(unsigned int timeout_sec, int no_reboot)
 {
     DrmCtx drm;
     FontCtx fc;
     int tty_fd = -1, origin_vt = -1, ret = 1;
+    pid_t apt_pid = -1;
+    int success = 1; /* 1 = success (to 100%, then reboot), 0 = failure (BSOD) */
 
     if (geteuid() != 0) {
         fprintf(stderr, "错误：需要 root 权限（sudo windows_update_in_linux）\n");
@@ -733,24 +803,71 @@ int fake_update_ttydrm_run(unsigned int timeout_sec)
     if (drm_set_mode(&drm) < 0)
         goto cleanup;
 
-    /* animation: 0 -> 35% (stuck), spinner spins, then timeout releases */
+    /* decide the outcome: 50/50 by default, overridable via WINDOWS_UPDATE_MODE */
+    {
+        const char *mode = getenv("WINDOWS_UPDATE_MODE");
+        if (mode && strcmp(mode, "success") == 0)
+            success = 1;
+        else if (mode && strcmp(mode, "failure") == 0)
+            success = 0;
+        else
+            success = (rand() % 2) == 0;
+    }
+    fprintf(stderr, success ? "[tty] 本次为：更新成功\n"
+                            : "[tty] 本次为：更新失败（超时后交给蓝屏）\n");
+
+    if (success)
+        apt_pid = spawn_real_update(); /* real apt update only on success */
+
+    /* animation */
     {
         int64_t start = now_ms();
-        int progress = 0, stuck = 0;
+        int progress = 0, stuck_at = 0, done = 0;
+        int64_t hold = 0;
+        const int64_t min_ms = (int64_t)timeout_sec * 1000;
+
+        if (!success)
+            stuck_at = 35 + (int)(rand() % 8); /* freeze at 35%%..42%% */
+
         for (;;) {
             int64_t now = now_ms();
             int64_t elapsed = now - start;
-            if (!stuck && progress < STUCK_AT) {
-                progress += 1 + (int)(rand() % 3);
-                if (progress > STUCK_AT)
-                    progress = STUCK_AT;
-                if (progress >= STUCK_AT)
-                    stuck = 1;
+
+            if (success) {
+                /* fast at first, then slower: asymptote to 99%% */
+                double p = 100.0 * (1.0 - exp(-(double)elapsed / 7000.0));
+                progress = (int)p;
+                if (progress > 99)
+                    progress = 99;
+                /* only reach 100%% after the real apt update finished and
+                 * the minimum runtime elapsed */
+                if (!done) {
+                    int apt_done = 1;
+                    if (apt_pid > 0 &&
+                        waitpid(apt_pid, NULL, WNOHANG) != apt_pid)
+                        apt_done = 0;
+                    if (apt_done && elapsed >= min_ms) {
+                        progress = 100;
+                        done = 1;
+                        hold = now;
+                    }
+                }
+                draw_frame(&fc, &drm, progress, now);
+                drm_flip(&drm);
+                if (done && now - hold >= 2000)
+                    break; /* show 100%% for 2s, then finish */
+            } else {
+                /* failure: progress climbs from 0% up to the random cap
+                 * (35%..42%), evenly over the minimum runtime, then sticks */
+                progress = (int)((double)stuck_at *
+                                 (double)elapsed / (double)min_ms);
+                if (progress > stuck_at)
+                    progress = stuck_at;
+                draw_frame(&fc, &drm, progress, now);
+                drm_flip(&drm);
+                if (elapsed >= min_ms)
+                    break; /* hand over to bsod after the minimum time */
             }
-            draw_frame(&fc, &drm, progress, now);
-            drm_flip(&drm);
-            if (elapsed >= (int64_t)timeout_sec * 1000)
-                break;
             usleep(FRAME_MS * 1000);
         }
     }
@@ -771,6 +888,23 @@ cleanup:
         }
         close(tty_fd);
     }
+
+    /* final action: reboot after a successful update, or hand the failure
+     * over to the embedded bsod (which replaces this process) */
+    if (success) {
+        if (no_reboot) {
+            fprintf(stderr, "[tty] 更新完成（--no-reboot，不重启）\n");
+        } else {
+            do_reboot(); /* does not return on success */
+        }
+    } else {
+        const char *reason = is_chinese_lang()
+                                 ? "Linux 在更新时出错"
+                                 : "An error occurred while updating Linux";
+        if (launch_bsod(reason, no_reboot) < 0)
+            fprintf(stderr, "[tty] 启动蓝屏失败，直接退出\n");
+    }
+
     fprintf(stderr, ret == 0 ? "[tty] 已释放并恢复桌面\n"
                              : "[tty] 异常退出，已尽力恢复桌面\n");
     return ret;
