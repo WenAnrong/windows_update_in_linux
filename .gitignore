@@ -1,0 +1,8 @@
+# build output
+build/
+
+# cpack staging leftovers (deb packaging was removed)
+_CPack_Packages/
+
+# compiled binary (repo root)
+/windows_update_in_linux
