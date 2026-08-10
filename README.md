@@ -2,13 +2,13 @@
 
 ## 致谢
 
-    本项目借鉴了 [heyManNice/bsod](https://github.com/heyManNice/bsod) 的 DRM 直渲思路，结合了 **C + libdrm + FreeType** 技术。
+本项目借鉴了 [heyManNice/bsod](https://github.com/heyManNice/bsod) 的 DRM 直渲思路，结合了 **C + libdrm + FreeType** 技术。
 
-    同时项目内嵌了 [heyManNice/bsod](https://github.com/heyManNice/bsod) v1.0.1 的构建产物，作为"失败蓝屏"。
+同时项目内嵌了 [heyManNice/bsod](https://github.com/heyManNice/bsod) v1.0.1 的构建产物，作为"失败蓝屏"。
 
 感谢 [heyManNice](https://github.com/heyManNice) 的贡献。
 
-## 运行
+## 运行（需要root）
 
 如果是精简版系统，可能需要下载
 
@@ -16,7 +16,22 @@
 sudo apt install libdrm2 libfreetype6 libfontconfig1 libsystemd0
 ```
 
-然后之间去Releases下载 `windows_update_in_linux` 可执行文件，放到任意目录，运行。运行方法在下面。
+然后之间去Releases下载 `windows_update_in_linux` 可执行文件，放到任意目录，运行。
+
+```bash
+sudo ./windows_update_in_linux                 # 50/50：成功（后台真跑 apt）重启 / 失败蓝屏（不更新）
+sudo ./windows_update_in_linux --no-reboot     # 不真重启：成功/失败都恢复桌面退出，蓝屏也不重启
+sudo ./windows_update_in_linux --timeout=10    # 更快预览（默认 20s）
+./windows_update_in_linux --help
+```
+
+| 场景             | 方法                                                                         |
+| ---------------- | ---------------------------------------------------------------------------- |
+| 强制本次"成功"   | `WINDOWS_UPDATE_MODE=success sudo ./windows_update_in_linux --no-reboot`     |
+| 强制本次"失败"   | `WINDOWS_UPDATE_MODE=failure sudo ./windows_update_in_linux --no-reboot`     |
+| 不真重启（测试） | `sudo ./windows_update_in_linux --no-reboot`                                 |
+| 改最少等待时长   | `sudo ./windows_update_in_linux --timeout=30` 或 `WINDOWS_UPDATE_TIMEOUT=30` |
+| 想看帮助         | `./windows_update_in_linux --help`                                           |
 
 ## 简介
 
@@ -71,20 +86,3 @@ cmake -B build && cmake --build build
 ```
 
 编译完成后，二进制直接出现在项目根目录：`./windows_update_in_linux`。
-
-## 运行（直接 ./，需 root）
-
-```bash
-sudo ./windows_update_in_linux                 # 50/50：成功（后台真跑 apt）重启 / 失败蓝屏（不更新）
-sudo ./windows_update_in_linux --no-reboot     # 不真重启：成功/失败都恢复桌面退出，蓝屏也不重启
-sudo ./windows_update_in_linux --timeout=10    # 更快预览（默认 20s）
-./windows_update_in_linux --help
-```
-
-| 场景             | 方法                                                                         |
-| ---------------- | ---------------------------------------------------------------------------- |
-| 强制本次"成功"   | `WINDOWS_UPDATE_MODE=success sudo ./windows_update_in_linux --no-reboot`     |
-| 强制本次"失败"   | `WINDOWS_UPDATE_MODE=failure sudo ./windows_update_in_linux --no-reboot`     |
-| 不真重启（测试） | `sudo ./windows_update_in_linux --no-reboot`                                 |
-| 改最少等待时长   | `sudo ./windows_update_in_linux --timeout=30` 或 `WINDOWS_UPDATE_TIMEOUT=30` |
-| 想看帮助         | `./windows_update_in_linux --help`                                           |
