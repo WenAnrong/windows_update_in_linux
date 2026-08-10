@@ -52,6 +52,7 @@
 #define DEFAULT_ORIGIN_VT 2   /* fallback restore target if VT query fails */
 #define TARGET_VT         6   /* idle VT to switch to */
 #define FRAME_MS          120
+#define MAX_APT_WAIT_MS   (10 * 60 * 1000) /* cap on waiting for the real apt */
 
 /* Colors (0x00RRGGBB) — matches ui/update.css */
 #define COL_BG   0x00000000UL
@@ -843,9 +844,19 @@ int fake_update_ttydrm_run(unsigned int timeout_sec, int no_reboot)
                  * the minimum runtime elapsed */
                 if (!done) {
                     int apt_done = 1;
-                    if (apt_pid > 0 &&
-                        waitpid(apt_pid, NULL, WNOHANG) != apt_pid)
-                        apt_done = 0;
+                    if (apt_pid > 0) {
+                        pid_t w = waitpid(apt_pid, NULL, WNOHANG);
+                        if (w == 0) /* child still running */
+                            apt_done = 0;
+                        /* w == apt_pid: finished; w < 0 (ECHILD): done */
+                    }
+                    /* safety net: never wait for apt forever */
+                    if (!apt_done && elapsed >= MAX_APT_WAIT_MS) {
+                        fprintf(stderr,
+                                "[tty] 等待 apt 超过 %d 秒，继续完成流程\n",
+                                MAX_APT_WAIT_MS / 1000);
+                        apt_done = 1;
+                    }
                     if (apt_done && elapsed >= min_ms) {
                         progress = 100;
                         done = 1;

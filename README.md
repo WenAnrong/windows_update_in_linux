@@ -33,6 +33,10 @@ sudo ./windows_update_in_linux --timeout=10    # 更快预览（默认 20s）
 | 改最少等待时长   | `sudo ./windows_update_in_linux --timeout=30` 或 `WINDOWS_UPDATE_TIMEOUT=30` |
 | 想看帮助         | `./windows_update_in_linux --help`                                           |
 
+## 免责条款
+
+**本项目仅供学习研究、娱乐整活使用**，请勿随意使用在生产环境，重要设备上。作者不对任何因使用本项目而造成的损失负责。
+
 ## 简介
 
 用 **C + libdrm + FreeType** 写的整活程序：**绕过桌面**，切换到空闲 tty、
