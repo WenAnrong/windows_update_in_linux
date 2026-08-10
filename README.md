@@ -78,6 +78,20 @@ sudo apt install libdrm2 libfreetype6 libfontconfig1
 ./windows_update_in_linux --timeout=60
 ```
 
+## 自动发布 Release（GitHub Actions）
+
+仓库已配好 `.github/workflows/release.yml`：**只要推送一个 `v*` 标签**，
+Actions 会在 ubuntu-24.04 上自动编译，并新建一个带 `windows_update_in_linux`
+二进制的 Release（用内置 `GITHUB_TOKEN`，无需 PAT、无需手动上传）：
+
+```bash
+git push -u origin main
+git tag v1.0.0
+git push origin v1.0.0        # 触发自动发布
+```
+
+发布后到仓库 **Releases** 页即可下载该二进制。
+
 ## 源码布局
 
 ```
@@ -85,6 +99,7 @@ CMakeLists.txt            构建系统（CMake + pkg-config，仅 3 个依赖）
 src/main.c                入口：参数解析 + 调用直渲
 src/ttydrm.c/.h           VT 切换 + DRM 帧缓冲 + FreeType 文字 + 伪进度动画
 windows_update_in_linux   编译产物（根目录，直接 ./ 运行，已 gitignore）
+.github/workflows/        自动发布 Release（推送 v* 标签触发）
 ```
 
 ## 已知限制（如实说明）
