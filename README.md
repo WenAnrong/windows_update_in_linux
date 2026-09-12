@@ -8,6 +8,8 @@
 
 感谢 [heyManNice](https://github.com/heyManNice) 的贡献。
 
+👍好用的云服务器，就选[雨云](https://www.rainyun.com/NzM3Njc4_) ，2核2g服务器28元/月起。
+
 ## 运行（需要root）
 
 如果是精简版系统，可能需要下载
